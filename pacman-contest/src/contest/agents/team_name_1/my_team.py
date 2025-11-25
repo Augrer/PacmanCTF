@@ -32,8 +32,10 @@ from util import nearest_point
 # Team creation #
 #################
 
+#def create_team(first_index, second_index, is_red,
+#                first='OffensiveReflexAgent', second='DefensiveReflexAgent', num_training=0):
 def create_team(first_index, second_index, is_red,
-                first='OffensiveReflexAgent', second='DefensiveReflexAgent', num_training=0):
+            first='AStarAgent', second='DefensiveReflexAgent', num_training=0):   
     """
     This function should return a list of two agents that will form the
     team, initialized using firstIndex and secondIndex as their agent
@@ -157,7 +159,7 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
         return features
 
     def get_weights(self, game_state, action):
-        return {'successor_score': 100, 'distance_to_food': -1}
+        return {'successor_score': 1000, 'distance_to_food': -25}
 
 
 class DefensiveReflexAgent(ReflexCaptureAgent):
@@ -195,3 +197,105 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
 
     def get_weights(self, game_state, action):
         return {'num_invaders': -1000, 'on_defense': 100, 'invader_distance': -10, 'stop': -100, 'reverse': -2}
+
+
+
+class AStarAgent(ReflexCaptureAgent):
+    """
+  A reflex agent that seeks food. This is an agent
+  we give you to get an idea of what an offensive agent might look like,
+  but it is by no means the best or only way to build an offensive agent.
+  """
+
+    def get_features(self, game_state, action):
+        features = util.Counter()
+        successor = self.get_successor(game_state, action)
+        capsules = self.get_capsules(successor)
+        food_list = self.get_food(successor).as_list()
+        my_state = game_state.get_agent_state(self.index)
+        current_load = my_state.num_carrying
+
+        features['successor_score'] = -len(food_list)  # self.get_score(successor)
+        
+
+        # Compute distance to the nearest food
+
+        if len(food_list) > 0:  # This should always be True,  but better safe than sorry
+            my_pos = successor.get_agent_state(self.index).get_position()
+            min_distance = min([self.get_maze_distance(my_pos, food) for food in food_list])
+            features['distance_to_food'] = min_distance
+
+        # Compute distance to closest defender ghost and try to min
+        enemies = [successor.get_agent_state(i) for i in self.get_opponents(successor)]
+        defenders = [a for a in enemies if not a.is_pacman and a.get_position() is not None and a.scared_timer == 0]
+        if len(defenders) > 0:
+            min_dist = min([self.get_maze_distance(my_pos, a.get_position()) for a in defenders])
+            features['enemy_distance'] = min_dist
+        else:
+            features['enemy_distance'] = 0
+
+        #Minimioze dist to capsules
+        if len(capsules) > 0:
+            # 3. Calculate distance to the closest one
+            min_distance_caps = min([self.get_maze_distance(my_pos, c) for c in capsules])
+            features['caps_distance'] = min_distance_caps
+        else:
+            features['caps_distance'] = 0
+        # return to own side after 5 pellets
+        if current_load > 5:
+            # Get all legal positions along the vertical dividing line
+            # (You will need to write a helper to get the boundary coordinates based on your team color)
+            boundary_coords = self.get_boundary_coords(game_state) 
+            
+            # Minimize the distance to the closest point on that boundary
+            min_dist_home = min([self.get_maze_distance(my_pos, b) for b in boundary_coords])
+            
+            features['return'] = min_dist_home
+
+        if len(capsules) > 0:
+            # 3. Calculate distance to the closest one
+            min_distance_caps = min([self.get_maze_distance(my_pos, c) for c in capsules])
+            features['caps_distance'] = min_distance_caps
+        else:
+            features['caps_distance'] = 0
+        return features
+
+    def get_weights(self, game_state, action):
+        return {'successor_score': 1000.0, "enemy_distance" : 100, 'num_invaders' : -5, 'distance_to_food': -25, 'caps_distance':10,'return':-1000}
+    
+
+class SearchNode:
+    def __init__(self, parent, node_info):
+        """
+            parent: parent SearchNode.
+
+            node_info: tuple with three elements => (coord, action, cost)
+
+            coord: (x,y) coordinates of the node position
+
+            action: Direction of movement required to reach node from
+            parent node. Possible values are defined by class Directions from
+            game.py
+
+            cost: cost of reaching this node from the starting node.
+        """
+
+        self.__state = node_info[0]
+        self.action = node_info[1]
+        self.cost = node_info[2] if parent is None else node_info[2] + parent.cost
+        self.parent = parent
+
+    # The coordinates of a node cannot be modified, se we just define a getter.
+    # This allows the class to be hashable.
+    @property
+    def state(self):
+        return self.__state
+
+    def get_path(self):
+        path = []
+        current_node = self
+        while current_node.parent is not None:
+            path.append(current_node.action)
+            current_node = current_node.parent
+        path.reverse()
+        return path

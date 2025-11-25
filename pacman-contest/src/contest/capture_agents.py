@@ -304,6 +304,25 @@ class CaptureAgent(Agent):
         else:
             self._distributions = dists  # These can be read by pacclient.py
 
+    def get_boundary_coords(self, game_state):
+        # Access the layout via the data attribute
+        layout = game_state.data.layout 
+        width = layout.width
+        height = layout.height
+
+        # Determine the x-coordinate of the boundary
+        if self.red:
+            x = int(width / 2) - 1 
+        else:
+            x = int(width / 2)
+
+        # Find valid positions
+        boundary_coords = []
+        for y in range(height):
+            if not layout.is_wall((x, y)):
+                boundary_coords.append((x, y))
+
+        return boundary_coords
 
 class TimeoutAgent(Agent):
     """
