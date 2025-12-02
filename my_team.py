@@ -35,7 +35,7 @@ from util import nearest_point
 #def create_team(first_index, second_index, is_red,
 #                first='OffensiveReflexAgent', second='DefensiveReflexAgent', num_training=0):
 def create_team(first_index, second_index, is_red,
-            first='HybridAgent', second='HybridAgent', num_training=0):   
+            first='HybridAgent_V2', second='HybridAgent_V2', num_training=0):   
     """
     This function should return a list of two agents that will form the
     team, initialized using firstIndex and secondIndex as their agent
@@ -414,7 +414,247 @@ class HybridAgent(CaptureAgent):
                 return True
         return False
     
-    
+
+class HybridAgent_V2(CaptureAgent):
+    """
+    Our updated Hybrid agent which now swarms in offense and has different states of being. 
+    Also now it only avoids deadends if a ghost is closer than 6 distance away.
+    """
+
+    def register_initial_state(self, game_state):
+        CaptureAgent.register_initial_state(self, game_state)
+        self.start = game_state.get_agent_position(self.index)
+        
+        # state init
+        self.mode = 'ATTACK'  # Initial mode
+        
+        # swarm logic
+        # we used team indices to deterministically assign roles
+        team_indices = self.get_team(game_state)
+        team_indices.sort()
+        # index 1 is the top agent, 0 bottom
+        self.is_top_agent = (self.index != team_indices[0])
+        
+        # identifying "home" region
+        if self.red:
+            boundary_x = game_state.data.layout.width // 2 - 1
+        else:
+            boundary_x = game_state.data.layout.width // 2
+        
+        self.boundary_goals = []
+        for y in range(game_state.data.layout.height):
+            if not game_state.has_wall(boundary_x, y):
+                self.boundary_goals.append((boundary_x, y))
+
+        # deadend logic
+        self.dead_end_tips = set()
+        width = game_state.data.layout.width
+        height = game_state.data.layout.height
+        
+        for x in range(width):
+            for y in range(height):
+                if not game_state.has_wall(x, y):
+                    neighbors = 0
+                    if game_state.has_wall(x+1, y): neighbors += 1
+                    if game_state.has_wall(x-1, y): neighbors += 1
+                    if game_state.has_wall(x, y+1): neighbors += 1
+                    if game_state.has_wall(x, y-1): neighbors += 1
+                    # A cell with 3 walls is the tip of a dead end
+                    if neighbors >= 3:
+                        self.dead_end_tips.add((x, y))
+
+    def choose_action(self, game_state):
+        my_pos = game_state.get_agent_position(self.index)
+        my_state = game_state.get_agent_state(self.index)
+        
+        enemies = [game_state.get_agent_state(i) for i in self.get_opponents(game_state)]
+        dangerous_ghosts = []
+        
+        for a in enemies:
+            if not a.is_pacman and a.get_position() is not None:
+                if a.scared_timer <= 5:
+                    dangerous_ghosts.append(a.get_position())
+
+        # nearest enemy
+        dist_to_ghost = 9999
+        if len(dangerous_ghosts) > 0:
+            dist_to_ghost = min([self.get_maze_distance(my_pos, g) for g in dangerous_ghosts])
+
+        # logic for changing states / modes
+        
+        carry_limit = 6  # greedy limit (collect more before returning) - too high? - testing!
+        time_left = game_state.data.timeleft
+
+        # prio1: flee using reflex
+        if my_state.is_pacman and dist_to_ghost <= 4:
+            self.mode = 'FLEE'
+            
+        elif self.mode == 'FLEE':
+            # if escaped (ghost far), resume mission
+            if dist_to_ghost > 6:
+                if my_state.num_carrying > 0:
+                    self.mode = 'RETURNING'
+                else:
+                    self.mode = 'ATTACK'
+            # if respawn (no longer pacman), reset to attack
+            elif not my_state.is_pacman:
+                self.mode = 'ATTACK'
+                
+        elif self.mode == 'ATTACK':
+            # do return if full OR time low
+            if my_state.num_carrying >= carry_limit or (time_left < 200 and my_state.num_carrying > 0):
+                self.mode = 'RETURNING'
+                
+        elif self.mode == 'RETURNING':
+            # after scoring go back to attack
+            if my_state.num_carrying == 0:
+                self.mode = 'ATTACK'
+
+        target_goals = []
+
+        if self.mode == 'FLEE':
+            # focus on capsule to get home 
+            capsules = self.get_capsules(game_state)
+            if capsules:
+                target_goals = capsules
+            else:
+                target_goals = self.boundary_goals
+                
+        elif self.mode == 'RETURNING':
+            target_goals = self.boundary_goals
+            
+        elif self.mode == 'ATTACK':
+            target_goals = self.get_safe_food(game_state, dangerous_ghosts, dist_to_ghost)
+            
+            if not target_goals:
+                capsules = self.get_capsules(game_state)
+                if capsules:
+                    target_goals = capsules
+                else:
+                    # patrol boundary closest to center
+                    target_goals = self.boundary_goals
+
+        # A* search! 
+        # lower node limit when fleeing to ensure instant reaction
+        limit = 400 if self.mode == 'FLEE' else 1500
+        next_action = self.a_star_search(game_state, my_pos, target_goals, dangerous_ghosts, limit)
+        
+        if next_action:
+            return next_action
+            
+        # failsafe - testing had this happen somehow ? -Yannic
+        return Directions.STOP
+
+    def get_safe_food(self, game_state, dangerous_ghosts, dist_to_ghost):
+        """
+        Returns a list of food targets.
+        Logic: 
+        1. Split map top/bottom based on agent index.
+        2. Only filter out 'dead ends' if a ghost is actually nearby.
+        """
+        all_food = self.get_food(game_state).as_list()
+        
+        # split food based on y-coordinate
+        layout_height = game_state.data.layout.height
+        mid_height = layout_height / 2
+        
+        my_slice = []
+        for f in all_food:
+            if self.is_top_agent and f[1] >= mid_height:
+                my_slice.append(f)
+            elif not self.is_top_agent and f[1] < mid_height:
+                my_slice.append(f)
+        
+        # if my side is empty, help teammate 
+        if not my_slice:
+            my_slice = all_food
+
+        # lazy tunneling: if ghost far, ignore tunnels
+        if dist_to_ghost > 6:
+            return my_slice
+
+        # if ghost near, avoid dead ends
+        safe_food = []
+        for f in my_slice:
+            if f not in self.dead_end_tips:
+                safe_food.append(f)
+        
+        return safe_food if safe_food else my_slice
+
+    def a_star_search(self, game_state, start_pos, goal_list, dangerous_ghosts, node_limit):
+        """
+        Standard A* with a node expansion limit to prevent timeouts.
+        Includes 'Soft' constraints for ghost proximity.
+        """
+        if not goal_list: 
+            return None
+        
+        # Heuristic: closest goal by maze distance
+        closest_goal = min(goal_list, key=lambda x: self.get_maze_distance(start_pos, x))
+        goal_set = set(goal_list)
+
+        pq = util.PriorityQueue()
+        pq.push((start_pos, []), 0)
+        visited = set()
+        
+        nodes_expanded = 0
+
+        while not pq.is_empty():
+            if nodes_expanded > node_limit:
+                break 
+                
+            current_pos, path = pq.pop()
+            nodes_expanded += 1
+
+            # check for goall
+            if current_pos in goal_set:
+                return path[0] if len(path) > 0 else Directions.STOP
+
+            if current_pos in visited: continue
+            visited.add(current_pos)
+
+            # generate successor states
+            x, y = int(current_pos[0]), int(current_pos[1])
+            neighbors = []
+            
+            for action in [Directions.NORTH, Directions.SOUTH, Directions.EAST, Directions.WEST]:
+                dx, dy = 0, 0
+                if action == Directions.NORTH: dy = 1
+                elif action == Directions.SOUTH: dy = -1
+                elif action == Directions.EAST: dx = 1
+                elif action == Directions.WEST: dx = -1
+                
+                next_x, next_y = x + dx, y + dy
+                
+                if not game_state.has_wall(next_x, next_y):
+                    neighbors.append(((next_x, next_y), action))
+
+            for next_pos, action in neighbors:
+                is_death = False
+                for g in dangerous_ghosts:
+                    if util.manhattan_distance(next_pos, g) <= 1:
+                        is_death = True
+                
+                if is_death: continue
+                
+                if next_pos not in visited:
+                    new_path = path + [action]
+                    
+                    g_cost = len(new_path)
+                    
+                    # ""fear""
+                    # penalty if path gets  kinda close to ghost (2-3 dist)
+                    for g in dangerous_ghosts:
+                        d = self.get_maze_distance(next_pos, g)
+                        if d <= 3: 
+                            g_cost += 10 
+                    
+                    # heuristiccost
+                    h_cost = self.get_maze_distance(next_pos, closest_goal)
+                    
+                    pq.push((next_pos, new_path), g_cost + h_cost)
+                    
+        return None
 '''
 class AStarAgent(CaptureAgent):
     """
